@@ -1,0 +1,142 @@
+ ############3csv generation final###########
+
+import mediapipe as mp
+import cv2
+import numpy as np
+import pandas as pd
+import os
+
+# Initialize Mediapipe
+mp_face_mesh = mp.solutions.face_mesh
+face_mesh = mp_face_mesh.FaceMesh(static_image_mode=True, max_num_faces=1)
+
+# ---- STEP 1: Extract geometric features ----
+def extract_measurements(image_path):
+    image = cv2.imread(image_path)
+    if image is None:
+        return None
+
+    rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    results = face_mesh.process(rgb)
+
+    if not results.multi_face_landmarks:
+        return None
+
+    h, w, _ = image.shape
+    lm = results.multi_face_landmarks[0].landmark
+
+    def px(point):
+        return np.array([int(point.x * w), int(point.y * h)])
+
+    # Key points
+    POINTS = {
+        "left_eye": 33, "right_eye": 263,
+        "mouth_left": 61, "mouth_right": 291,
+        "nose_tip": 1, "chin": 152,
+        "left_eyebrow": 105, "right_eyebrow": 334,
+        "upper_lip": 13, "lower_lip": 14,
+        "left_cheek": 50, "right_cheek": 280,
+        "jaw_left": 172, "jaw_right": 397
+    }
+
+    coords = {name: px(lm[idx]) for name, idx in POINTS.items()}
+
+    # 30 geometric features
+    measurements = {
+        # Original 15
+        "eye_distance": np.linalg.norm(coords["right_eye"] - coords["left_eye"]),
+        "mouth_width": np.linalg.norm(coords["mouth_right"] - coords["mouth_left"]),
+        "face_height": np.linalg.norm(coords["chin"] - coords["nose_tip"]),
+        "eyebrow_distance": np.linalg.norm(coords["right_eyebrow"] - coords["left_eyebrow"]),
+        "lip_thickness": np.linalg.norm(coords["upper_lip"] - coords["lower_lip"]),
+        "cheek_width": np.linalg.norm(coords["right_cheek"] - coords["left_cheek"]),
+        "jaw_width": np.linalg.norm(coords["jaw_right"] - coords["jaw_left"]),
+        "eye_to_mouth": np.linalg.norm(coords["left_eye"] - coords["mouth_left"]),
+        "nose_to_mouth": np.linalg.norm(coords["nose_tip"] - coords["mouth_left"]),
+        "eye_to_chin": np.linalg.norm(coords["left_eye"] - coords["chin"]),
+        "mouth_to_chin": np.linalg.norm(coords["mouth_left"] - coords["chin"]),
+        "eye_to_nose": np.linalg.norm(coords["left_eye"] - coords["nose_tip"]),
+        "eyebrow_to_eye": np.linalg.norm(coords["left_eyebrow"] - coords["left_eye"]),
+        "cheek_to_eye": np.linalg.norm(coords["left_cheek"] - coords["left_eye"]),
+        "jaw_to_cheek": np.linalg.norm(coords["jaw_left"] - coords["left_cheek"]),
+
+        # New 15
+        "left_eye_to_nose": np.linalg.norm(coords["left_eye"] - coords["nose_tip"]),
+        "right_eye_to_nose": np.linalg.norm(coords["right_eye"] - coords["nose_tip"]),
+        "left_eye_to_chin": np.linalg.norm(coords["left_eye"] - coords["chin"]),
+        "right_eye_to_chin": np.linalg.norm(coords["right_eye"] - coords["chin"]),
+        "mouth_left_to_chin": np.linalg.norm(coords["mouth_left"] - coords["chin"]),
+        "mouth_right_to_chin": np.linalg.norm(coords["mouth_right"] - coords["chin"]),
+        "left_eyebrow_to_nose": np.linalg.norm(coords["left_eyebrow"] - coords["nose_tip"]),
+        "right_eyebrow_to_nose": np.linalg.norm(coords["right_eyebrow"] - coords["nose_tip"]),
+        "left_cheek_to_mouth": np.linalg.norm(coords["left_cheek"] - coords["mouth_left"]),
+        "right_cheek_to_mouth": np.linalg.norm(coords["right_cheek"] - coords["mouth_right"]),
+        "left_cheek_to_chin": np.linalg.norm(coords["left_cheek"] - coords["chin"]),
+        "right_cheek_to_chin": np.linalg.norm(coords["right_cheek"] - coords["chin"]),
+        "jaw_left_to_nose": np.linalg.norm(coords["jaw_left"] - coords["nose_tip"]),
+        "jaw_right_to_nose": np.linalg.norm(coords["jaw_right"] - coords["nose_tip"]),
+        "eyebrow_to_chin": np.linalg.norm(coords["left_eyebrow"] - coords["chin"]),
+    }
+
+    return measurements
+
+# ---- STEP 2: Frequency features ----
+def frequency_features(image_path):
+    img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+    if img is None:
+        return {"hf_ratio": 0, "variance": 0}
+
+    f = np.fft.fft2(img)
+    fshift = np.fft.fftshift(f)
+    magnitude = np.abs(fshift)
+
+    h, w = magnitude.shape
+    center = (h // 2, w // 2)
+    radius = min(center) // 4
+
+    y, x = np.ogrid[:h, :w]
+    mask = (x - center[1])**2 + (y - center[0])**2 <= radius**2
+
+    low_freq_energy = magnitude[mask].sum()
+    high_freq_energy = magnitude[~mask].sum()
+
+    total_energy = low_freq_energy + high_freq_energy
+    hf_ratio = high_freq_energy / (total_energy + 1e-6)
+    variance = magnitude.var()
+
+    return {"hf_ratio": hf_ratio, "variance": variance}
+
+# ---- STEP 3: Process dataset ----
+def process_dataset(dataset_path, output_csv="features.csv"):
+    data = []
+
+    for label_name, label_val in [("training_real", 0), ("training_fake", 1)]:
+        folder = os.path.join(dataset_path, label_name)
+        if not os.path.exists(folder):
+            continue
+
+        for img_name in os.listdir(folder):
+            img_path = os.path.join(folder, img_name)
+            measurements = extract_measurements(img_path)
+            if measurements is None:
+                print(f"Skipping {img_name}, no face detected.")
+                continue
+
+            freq = frequency_features(img_path)
+
+            row = {**measurements, **freq}
+            row["label"] = label_val
+            row["filename"] = img_name
+            data.append(row)
+
+    df = pd.DataFrame(data)
+    df.to_csv(output_csv, index=False)
+    print(f"\n✅ Features saved to {output_csv} with {len(df)} samples.")
+    return df
+
+# ---- RUN ----
+dataset_path = "/content/real_fake_faces/real_and_fake_face_detection/real_and_fake_face"  # <-- my path
+df = process_dataset(dataset_path, output_csv="deepfake_features.csv")
+
+# Preview
+print(df.head())
