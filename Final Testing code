@@ -1,0 +1,129 @@
+# ------------------- IMPORTS -------------------
+import mediapipe as mp
+import cv2
+import numpy as np
+import pandas as pd
+import joblib  # For loading the scaler and columns
+import tensorflow as tf
+import os
+from google.colab.patches import cv2_imshow
+
+# ------------------- FEATURE EXTRACTION (Your Code) -------------------
+# This must be the exact same feature extraction process used to create the CSV
+mp_face_mesh = mp.solutions.face_mesh
+face_mesh = mp_face_mesh.FaceMesh(static_image_mode=True, max_num_faces=1, min_detection_confidence=0.5)
+
+def extract_all_features(image_path):
+    """Extracts all features and returns them as a dictionary, along with the image."""
+    image = cv2.imread(image_path)
+    if image is None: return None, None
+    try:
+        rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        results = face_mesh.process(rgb_image)
+        if not results.multi_face_landmarks: return None, None
+
+        h, w, _ = image.shape
+        lm = results.multi_face_landmarks[0].landmark
+        def px(p): return np.array([int(p.x * w), int(p.y * h)])
+
+        # Define the exact same set of landmarks used for training
+        coords = {
+            "left_eye":px(lm[33]), "right_eye":px(lm[263]), "mouth_left":px(lm[61]),
+            "mouth_right":px(lm[291]), "nose_tip":px(lm[1]), "chin":px(lm[152]),
+            "left_eyebrow":px(lm[105]), "right_eyebrow":px(lm[334])
+        }
+        landmark_features = {
+            "eye_distance": np.linalg.norm(coords["right_eye"] - coords["left_eye"]),
+            "mouth_width": np.linalg.norm(coords["mouth_right"] - coords["mouth_left"]),
+            "face_height": np.linalg.norm(coords["chin"] - coords["nose_tip"]),
+            "eyebrow_distance": np.linalg.norm(coords["right_eyebrow"] - coords["left_eyebrow"])
+        }
+
+        gray_image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        f = np.fft.fft2(gray_image)
+        fshift = np.fft.fftshift(f)
+        magnitude = np.abs(fshift)
+        hf_ratio = np.sum(magnitude[h//4:-h//4, w//4:-w//4]) / (np.sum(magnitude) + 1e-6)
+
+        frequency_features = {"hf_ratio": hf_ratio}
+
+        return {**landmark_features, **frequency_features}, image
+    except Exception as e:
+        print(f"An error occurred during feature extraction for {image_path}: {e}")
+        return None, None
+
+# =================== MAIN PREDICTION WORKFLOW ===================
+if __name__ == '__main__':
+
+    # --- 1. Define Paths for the Prediction Package from your friend ---
+    MODEL_PATH = 'Deepfake_detector_model.h5'
+    SCALER_PATH = 'scaler.joblib'
+    COLUMNS_PATH = 'feature_columns.joblib'
+
+    # --- 2. Load the Prediction Package ---
+    try:
+        model = tf.keras.models.load_model(MODEL_PATH)
+        scaler = joblib.load(SCALER_PATH)
+        feature_columns = joblib.load(COLUMNS_PATH)
+        print("✅ Model, scaler, and feature columns loaded successfully.")
+    except Exception as e:
+        print(f"❌ Error loading files: {e}")
+        print(f"Please make sure '{MODEL_PATH}', '{SCALER_PATH}', and '{COLUMNS_PATH}' are in the same directory as the script.")
+        exit()
+
+    # --- 3. Define the new images you want to test ---
+    test_image_1_path = "test.jpg"
+    test_image_2_path = "testt.jpg"
+
+    # --- 4. Process and predict for each image ---
+    final_images = []
+    for img_path in [test_image_1_path, test_image_2_path]:
+        print(f"\nProcessing {img_path}...")
+
+        features, image_to_display = extract_all_features(img_path)
+        if features is None:
+            print(f"Could not detect a face or extract features from {img_path}. Skipping.")
+            continue
+
+        # Create a DataFrame with the exact same column order
+        feature_df = pd.DataFrame([features], columns=feature_columns)
+
+        # Scale the features using the loaded scaler
+        features_scaled = scaler.transform(feature_df)
+
+        # Reshape for the model's expected input (as a sequence of 1)
+        # Shape becomes: (1 sample, 1 timestep, num_features)
+        features_reshaped = features_scaled.reshape(1,  len(feature_columns))
+
+        # Predict using the loaded model
+        probability = model.predict(features_reshaped)[0][0]
+
+        # Determine the verdict
+        verdict = "image 2 is more likely FAKE" if probability > 0.5 else "Image 1 more likely REAL "
+        confidence = probability if verdict == "FAKE" else 1 - probability
+
+        print(f"Verdict for {img_path}: {verdict} (Confidence: {confidence:.2f})")
+
+        # Draw the verdict on the image for display
+        cv2.putText(image_to_display, verdict, (30, 60), cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 0, 255) if verdict == "FAKE" else (0, 255, 0), 3)
+        final_images.append(image_to_display)
+
+    # --- 5. Display the results side-by-side ---
+    if len(final_images) == 2:
+        img1, img2 = final_images
+        h = min(img1.shape[0], img2.shape[0])
+        w1 = int(img1.shape[1] * h / img1.shape[0])
+        w2 = int(img2.shape[1] * h / img2.shape[0])
+
+        combined_image = np.hstack((cv2.resize(img1, (w1, h)), cv2.resize(img2, (w2, h))))
+
+        print("\n displaying results below")
+        cv2_imshow(combined_image)
+
+     #   cv2.imshow('Final Verdicts', combined_image)
+      #  print("\nDisplaying results. Press any key to close the window.")
+       # cv2.waitKey(0)
+        #cv2.destroyAllWindows()
+    else:
+        print("\nCould not display results as one or both images failed processing.")
+
