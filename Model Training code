@@ -1,0 +1,80 @@
+
+
+import pandas as pd
+import numpy as np
+import xgboost as xgb
+import joblib
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import classification_report, confusion_matrix, accuracy_score
+import seaborn as sns
+import matplotlib.pyplot as plt
+
+# --- 1. LOAD THE ENHANCED FEATURE DATASET ---
+CSV_PATH = '/content/deepfake_features.csv'
+try:
+    df = pd.read_csv(CSV_PATH)
+    print(f"✅ Successfully loaded '{CSV_PATH}' with {len(df)} samples.")
+except FileNotFoundError:
+    print(f"❌ Error: '{CSV_PATH}' not found.")
+    print("Please make sure the feature CSV file is in the correct directory.")
+    exit()
+
+# --- 2. PREPARE DATA FOR MACHINE LEARNING ---
+# Check if 'filename' column exists before dropping
+if 'filename' in df.columns:
+    X = df.drop(['label', 'filename'], axis=1)
+else:
+    X = df.drop('label', axis=1)
+y = df['label']
+
+# Save the column order for the prediction script later
+feature_columns = X.columns.tolist()
+joblib.dump(feature_columns, 'feature_columns.joblib')
+print("Saved feature column order to 'feature_columns.joblib'")
+
+# Split data into training and testing sets
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42, stratify=y)
+print("\nData has been split into training and testing sets.")
+
+
+# --- 3. SCALE THE FEATURES (CRITICAL STEP) ---
+scaler = StandardScaler()
+X_train_scaled = scaler.fit_transform(X_train)
+X_test_scaled = scaler.transform(X_test)
+print("Features have been scaled correctly (fitted on training data only).")
+
+# Save the scaler
+joblib.dump(scaler, 'scaler.joblib')
+print("Saved the scaler to 'scaler.joblib'")
+
+# --- 4. TRAIN THE XGBOOST MODEL ---
+print("\nTraining the XGBoost model...")
+model = xgb.XGBClassifier(
+    objective='binary:logistic', n_estimators=1000, learning_rate=0.05,
+    use_label_encoder=False, eval_metric='logloss', n_jobs=-1
+)
+
+# Removed early stopping arguments
+model.fit(X_train_scaled, y_train)
+print("✅ Training complete.")
+
+# --- 5. EVALUATE THE MODEL ---
+print("\n--- Model Evaluation on Unseen Test Set ---")
+y_pred = model.predict(X_test_scaled)
+accuracy = accuracy_score(y_test, y_pred)
+print(f"\nOverall Accuracy: {accuracy * 100:.2f}%")
+print("\nClassification Report:")
+print(classification_report(y_test, y_pred, target_names=['REAL', 'FAKE']))
+
+cm = confusion_matrix(y_test, y_pred)
+plt.figure(figsize=(6, 4))
+sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=['REAL', 'FAKE'], yticklabels=['REAL', 'FAKE'])
+plt.title('Confusion Matrix on Test Data')
+plt.show()
+
+# --- 6. SAVE THE FINAL TRAINED MODEL ---
+joblib.dump(model, 'deepfake_model.joblib')
+print("\n✅ Final trained model saved as 'deepfake_model.joblib'")
+print("\n--- Workflow Complete ---")
